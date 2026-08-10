@@ -467,6 +467,10 @@ Chat uses the same CPU-only streamed trunk and routed-expert cache as batch mode
 `--trunk-gb`, and `--cache-gb` keep exactly their existing meanings: no experts are preloaded
 and the trunk remains disk-streamed unless those existing memory flags ask otherwise.
 
+The built-in REPL is text chat. The optional `k3serve` package adds an
+OpenAI-compatible HTTP surface, streamed reasoning, and typed function tools while
+using the same exact-weight runtime.
+
 ### Diagnostic options
 
 | flag | argument | |
