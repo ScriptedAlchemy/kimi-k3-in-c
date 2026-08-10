@@ -99,7 +99,8 @@ add_library(k3 STATIC
   src/io/k3_trunk.c
   src/cache/k3_cache.c
   src/model/k3_bind.c
-  src/runtime/k3_forward.c)
+  src/runtime/k3_forward.c
+  src/runtime/k3_runtime.c)
 
 target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -146,6 +147,7 @@ k3_add_test(test_tok    tests/unit/test_tok.c)
 k3_add_test(test_chat   tests/unit/test_chat.c)
 target_link_libraries(test_chat PRIVATE k3_chat)
 k3_add_test(test_runtime_api tests/unit/test_runtime_api.c)
+k3_add_test(test_runtime tests/unit/test_runtime.c)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
 
@@ -160,6 +162,7 @@ add_test(NAME config     COMMAND test_cfg   fixture ${FIX}/ref_k3.json)
 add_test(NAME scale      COMMAND scale_test)
 add_test(NAME oracle     COMMAND k3_model   ${FIX})
 add_test(NAME chat_template COMMAND test_chat ${FIX}/chat/tokenizer)
+add_test(NAME runtime_lifecycle COMMAND test_runtime ${FIX}/chat/tokenizer)
 
 # The negative half of the config contract. Each fixture is the working flat config with
 # exactly one field mutated, so a rejection can only come from that field. Without these

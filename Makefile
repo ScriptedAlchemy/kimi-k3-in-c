@@ -101,7 +101,7 @@ ENGINE_SRC := src/core/k3_ops.c \
               src/io/k3_st.c src/io/k3_load.c src/io/k3_trunk.c \
               src/cache/k3_cache.c \
               src/model/k3_bind.c \
-              src/runtime/k3_forward.c
+              src/runtime/k3_forward.c src/runtime/k3_runtime.c
 ENGINE_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(ENGINE_SRC))
 
 CLI_SRC    := src/cli/k3_run.c
@@ -109,7 +109,8 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok test_chat test_runtime_api scale_test k3_model
+UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok test_chat test_runtime_api \
+              test_runtime scale_test k3_model
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -159,8 +160,11 @@ $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 $(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
 	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
-$(BIN)/test_runtime_api: tests/unit/test_runtime_api.c | $(BIN)
-	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
+$(BIN)/test_runtime_api: tests/unit/test_runtime_api.c $(ENGINE_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
+
+$(BIN)/test_runtime: tests/unit/test_runtime.c $(ENGINE_OBJ) | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $^ -o $@ $(LDFLAGS)
 
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $^ -o $@ -lm
@@ -196,6 +200,7 @@ test: $(TEST_BINS)
 	          echo "           repository. Run: make tok TOK_FILES=/path/to/k3model"; \
 	 fi
 	@echo "== chat template =="; ./$(BIN)/test_chat $(FIXTURES)/chat/tokenizer
+	@echo "== runtime lifecycle =="; ./$(BIN)/test_runtime $(FIXTURES)/chat/tokenizer
 	@echo "== real dimensions ==";   ./$(BIN)/scale_test
 	@echo "== full-model oracle =="; ./$(BIN)/k3_model $(FIXTURES)
 	@echo

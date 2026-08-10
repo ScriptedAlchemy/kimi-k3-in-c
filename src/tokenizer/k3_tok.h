@@ -214,10 +214,13 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
         if (id < 0 || id >= T->n_ids) {
             fprintf(stderr, "k3_tok: added token id %d out of range\n", id); exit(1);
         }
-        T->sp[k].str = jc->str;                  /* json_parse strings are independent */
-        T->sp[k].len = (int)strlen(jc->str);
+        const size_t special_len = strlen(jc->str);
+        T->sp[k].str = (char *)malloc(special_len + 1);
+        if (!T->sp[k].str) { fprintf(stderr, "k3_tok: OOM on added token %d\n", id); exit(1); }
+        memcpy(T->sp[k].str, jc->str, special_len + 1);
+        T->sp[k].len = (int)special_len;
         T->sp[k].id  = id;
-        T->id2str[id]   = jc->str;               /* added tokens decode literally */
+        T->id2str[id]   = T->sp[k].str;           /* added tokens decode literally */
         T->id_added[id] = 1;
         jval *sf = json_get(e, "special");
         if (sf && sf->t == J_BOOL && sf->boolean) T->id_special[id] = 1;
@@ -225,8 +228,29 @@ static inline void k3_tok_load(Tok *T, const char *files_dir)
     /* longest match first, so "<|end_of_msg|>" wins over any prefix of it */
     qsort(T->sp, (size_t)T->nsp, sizeof(Special), cmp_sp_len);
 
+    json_free(root);
+    free(arena);
+    free(cfg);
+
     fprintf(stderr, "[TOK] %d ranks (max id %d) + %d added tokens | kimi=%d rankbpe=%d\n",
             nrank, maxrank, T->nsp, T->kimi, T->rankbpe);
+}
+
+/* k3_tok_load allocates one unique string for every populated id. The hash table and
+ * Special entries borrow those same pointers, so id2str is the single ownership list. */
+static inline void k3_tok_free(Tok *T)
+{
+    if (!T) return;
+    if (T->id2str) {
+        for (int i = 0; i < T->n_ids; i++) free(T->id2str[i]);
+    }
+    free(T->vocab.e);
+    free(T->merges.e);
+    free(T->id2str);
+    free(T->id_added);
+    free(T->id_special);
+    free(T->sp);
+    memset(T, 0, sizeof *T);
 }
 
 #endif /* K3_TOK_H */

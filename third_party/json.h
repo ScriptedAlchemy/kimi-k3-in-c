@@ -172,4 +172,24 @@ static jval *json_get(jval *o, const char *key) {
     return NULL;
 }
 
+/* Release one complete parse tree. Strings are individually allocated by j_dup, so
+ * they must be walked with the nodes rather than freed through arena_out. */
+static inline void json_free(jval *v) {
+    if (!v) return;
+    if (v->t == J_OBJ) {
+        for (int i = 0; i < v->len; i++) {
+            free(v->keys[i]);
+            json_free(v->kids[i]);
+        }
+        free(v->keys);
+        free(v->kids);
+    } else if (v->t == J_ARR) {
+        for (int i = 0; i < v->len; i++) json_free(v->kids[i]);
+        free(v->kids);
+    } else if (v->t == J_STR) {
+        free(v->str);
+    }
+    free(v);
+}
+
 #endif
