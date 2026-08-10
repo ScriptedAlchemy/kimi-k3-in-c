@@ -61,6 +61,10 @@
 #include "k3_chat.h"
 #include "k3_sampler.h"
 #include "k3_cfg.h"   /* read the checkpoint's own config rather than assuming it */
+#include "k3_forward.h"
+
+static int argmax_(const float *v, int n)
+{ int b = 0; for (int i = 1; i < n; i++) if (v[i] > v[b]) b = i; return b; }
 
 static double now_s(void)
 {
@@ -123,9 +127,6 @@ static int real_cfg(K3Cfg *c, int *fa, int fa_max,
            "        --config PATH to validate against the real file.\n", shard_dir);
     return 1;
 }
-
-static int argmax_(const float *v, int n)
-{ int b = 0; for (int i = 1; i < n; i++) if (v[i] > v[b]) b = i; return b; }
 
 /* ------------------------------------------------------- conversation state ----
  * Everything the engine carries between tokens, on disk. The point is turn two of a
@@ -456,114 +457,6 @@ static double mem_available_bytes(void)
     return kb * 1024.0;
 }
 
-typedef struct {
-    K3LayerBind *lay;
-    K3ModelBind  mb;
-    int          n_bound;
-    K3Trunk     *trunk;      /* non-NULL when the trunk is streamed rather than resident */
-    /* Incremental decode state. Only MLA layers need a KV cache, so the 24 of them are
-     * numbered densely rather than indexing all 93 and wasting 74% of the allocation. */
-    float       *kvc, *ropec;
-    int         *mla_slot;   /* [n_layers] -> dense MLA index, or -1 */
-    int          n_mla, kv_cap, cached;
-    int          draft_mode;   /* 1 for the hybrid draft: cache-only expert routing */
-} Weights;
-
-/* One full forward over T tokens, writing logits for the LAST position only. Every
- * step rebuilds state from scratch, matching the path the oracle validates.
- *
- * Returns 0 on success and -1 if the forward could not be completed. The caller MUST
- * check: on failure logits_last is left untouched, and argmaxing an untouched buffer
- * yields a token drawn from uninitialised memory, printed as though it were output. */
-/* arg_all: when non-NULL, receives argmax(logits) for EVERY position 0..T-1, which is
- * what batched greedy verification consumes. logits_last still gets the final position's
- * full vector either way. The extra cost is one lm_head matmul per additional position,
- * pure RAM-resident compute; measured, an extra verified position costs ~22% of a serial
- * token at streamed-trunk budgets, which is the entire economics of --spec. */
-static int forward(Weights *w, const K3Cfg *c, K3Cache *cache, const int *ids, int T,
-                   float *logits_last, float *scratch, float *h, float *br, float *kstate,
-                   int *arg_all)
-{
-    const int E = c->hidden;
-    const int maxb = c->n_layers / c->attn_res_block + 2;
-    const int P = c->kda_heads * c->kda_head_dim;
-    const size_t kper = (size_t)P * c->kda_head_dim + (size_t)3 * P * (c->conv_k - 1);
-
-    for (int t = 0; t < T; t++)
-        k3_embed_row(h + (size_t)t * E, w->mb.embed, w->mb.wdt, ids[t], E);
-
-    memset(br, 0, (size_t)T * maxb * E * sizeof(float));
-    /* Incremental decode carries the KDA recurrent matrix and ShortConv history across
-     * steps, so it must NOT be cleared here; the full-recompute path rebuilds from
-     * scratch every step and must be. */
-    if (!w->kvc) memset(kstate, 0, kper * (size_t)w->n_bound * sizeof(float));
-    int nb = 0;
-    for (int L = 0; L < w->n_bound; L++) {
-        /* Streaming: bring this layer in, and hint the next one so its read overlaps
-         * this layer's arithmetic. The order is fixed 0..92 every token, so the hint is
-         * never wrong. */
-        if (w->trunk) {
-            if (k3_trunk_bind(w->trunk, c, L, &w->lay[L]) != 0) {
-                fprintf(stderr, "trunk bind failed at layer %d\n", L);
-                return -1;
-            }
-            k3_trunk_prefetch(w->trunk, L + 1);
-        }
-        /* Point this layer's MoE at the cache before use. Doing it here rather than at
-         * bind time keeps K3LayerBind independent of any particular cache. */
-        if (w->lay[L].lay.moe) {
-            w->lay[L].moe.src = &cache->src;
-            w->lay[L].moe.layer = L;
-            /* The draft routes only among resident experts, reading zero new expert bytes;
-             * the exact model keeps true routing. This is what makes a draft step cheap. */
-            w->lay[L].moe.cache_only = w->draft_mode;
-        }
-        if (w->kvc && w->mla_slot[L] >= 0) {
-            const size_t kvper = (size_t)w->kv_cap * c->n_heads * (c->qk_nope + c->v_head);
-            const size_t rpper = (size_t)w->kv_cap * c->qk_rope;
-            const int mi = w->mla_slot[L];
-            k3_decoder_layer_inc(h, br, &nb, &w->lay[L].lay, c, L, T,
-                                 kstate + kper * (size_t)L, scratch,
-                                 w->kvc + kvper * (size_t)mi,
-                                 w->ropec + rpper * (size_t)mi,
-                                 w->cached, w->kv_cap);
-        } else {
-            k3_decoder_layer_inc(h, br, &nb, &w->lay[L].lay, c, L, T,
-                                 kstate + kper * (size_t)L, scratch,
-                                 NULL, NULL, 0, 0);
-        }
-    }
-
-    /* The model-level aggregator, beyond the two per layer. Exactly one pair exists in
-     * the checkpoint; skipping it is silent. */
-    if (w->mb.out_res_norm && w->mb.out_res_proj) {
-        float *fold = scratch;
-        float *src  = fold + E;
-        for (int i = 0; i < E; i++) fold[i] = w->mb.out_res_norm[i] * w->mb.out_res_proj[i];
-        for (int t = 0; t < T; t++) {
-            for (int b = 0; b < nb; b++)
-                memcpy(src + (size_t)b * E, br + ((size_t)t * maxb + b) * E,
-                       (size_t)E * sizeof(float));
-            memcpy(src + (size_t)nb * E, h + (size_t)t * E, (size_t)E * sizeof(float));
-            k3_attn_res(h + (size_t)t * E, src, fold, nb + 1, E, c->rms_eps);
-        }
-    }
-
-    float *nrm = scratch;
-    if (arg_all) {
-        for (int t = 0; t < T; t++) {
-            k3_rmsnorm(nrm, h + (size_t)t * E, w->mb.norm, E, c->rms_eps);
-            k3_mmw(logits_last, nrm, w->mb.lm_head, w->mb.wdt, E, c->vocab);
-            arg_all[t] = argmax_(logits_last, c->vocab);
-        }
-        /* logits_last now holds the FINAL position's vector, same as the plain path. */
-        return 0;
-    }
-    k3_rmsnorm(nrm, h + (size_t)(T - 1) * E, w->mb.norm, E, c->rms_eps);
-    k3_mmw(logits_last, nrm, w->mb.lm_head, w->mb.wdt, E, c->vocab);
-    return 0;
-}
-
 /* ----------------------------------------------------------------------- chat ----
  * Chat deliberately owns only transcript and decode policy.  It calls the exact same
  * forward() and streamed K3Cache as batch mode, so --preset/--trunk-gb/--cache-gb keep
@@ -600,7 +493,7 @@ static int chat_render_ids(Tok *tok, const K3ChatHistory *history,
 }
 
 static int chat_resize(int want, int *tmax, int nl, int maxb, size_t kper,
-                       Weights *w, const K3Cfg *c,
+                       K3Weights *w, const K3Cfg *c,
                        float **h, float **br, float **sc, int **seq)
 {
     if (want <= *tmax) return 0;
@@ -613,19 +506,22 @@ static int chat_resize(int want, int *tmax, int nl, int maxb, size_t kper,
     float *ns = (float *)malloc(sc_need * sizeof(*ns));
     int *nq = (int *)malloc((size_t)(want + 8) * sizeof(*nq));
     float *nk = NULL, *nr = NULL;
-    if (w->kvc) {
+    if (w->kv_cache) {
         const size_t kvper = (size_t)want * c->n_heads * (c->qk_nope + c->v_head);
         const size_t rpper = (size_t)want * c->qk_rope;
         nk = (float *)calloc(kvper * (size_t)w->n_mla, sizeof(*nk));
         nr = (float *)calloc(rpper * (size_t)w->n_mla, sizeof(*nr));
     }
-    if (!nh || !nb || !ns || !nq || (w->kvc && (!nk || !nr))) {
+    if (!nh || !nb || !ns || !nq || (w->kv_cache && (!nk || !nr))) {
         free(nh); free(nb); free(ns); free(nq); free(nk); free(nr);
         fprintf(stderr, "chat: buffer allocation failed for %d positions\n", want); return -1;
     }
     free(*h); free(*br); free(*sc); free(*seq);
     *h = nh; *br = nb; *sc = ns; *seq = nq;
-    if (w->kvc) { free(w->kvc); free(w->ropec); w->kvc = nk; w->ropec = nr; w->kv_cap = want; }
+    if (w->kv_cache) {
+        free(w->kv_cache); free(w->rope_cache);
+        w->kv_cache = nk; w->rope_cache = nr; w->kv_capacity = want;
+    }
     *tmax = want;
     (void)nl; (void)kper;
     return 0;
@@ -634,7 +530,7 @@ static int chat_resize(int want, int *tmax, int nl, int maxb, size_t kper,
 static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history,
                     const char *history_path, int **prompt_ref, int np, int gen,
                     int incremental, int greedy, double temperature, double top_p,
-                    uint64_t seed, Weights *w, const K3Cfg *c, K3Cache *cache,
+                    uint64_t seed, K3Weights *w, const K3Cfg *c, K3Cache *cache,
                     int nl, int *tmax, float **h, float **br, float *ks,
                     float **sc, float *lg, int **seq, int *outtok, int maxb, size_t kper)
 {
@@ -661,10 +557,13 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
         memcpy(*seq, prompt, (size_t)np * sizeof(**seq));
         memset(ks, 0, kper * (size_t)nl * sizeof(*ks));
         if (incremental) {
-            const size_t kvper = (size_t)w->kv_cap * c->n_heads * (c->qk_nope + c->v_head);
-            const size_t rpper = (size_t)w->kv_cap * c->qk_rope;
-            memset(w->kvc, 0, kvper * (size_t)w->n_mla * sizeof(*w->kvc));
-            memset(w->ropec, 0, rpper * (size_t)w->n_mla * sizeof(*w->ropec));
+            const size_t kvper = (size_t)w->kv_capacity * c->n_heads *
+                                 (c->qk_nope + c->v_head);
+            const size_t rpper = (size_t)w->kv_capacity * c->qk_rope;
+            memset(w->kv_cache, 0,
+                   kvper * (size_t)w->n_mla * sizeof(*w->kv_cache));
+            memset(w->rope_cache, 0,
+                   rpper * (size_t)w->n_mla * sizeof(*w->rope_cache));
         }
         w->cached = 0;
         int T = np, nraw = 0, frc = 0;
@@ -672,14 +571,17 @@ static int chat_run(Tok *tok, const K3ChatTemplate *tmpl, K3ChatHistory *history
         while (nraw < gen) {
             if (incremental) {
                 if (!nraw) {
-                    frc = forward(w, c, cache, *seq, T, lg, *sc, *h, *br, ks, NULL);
+                    frc = k3_forward(w, c, cache, *seq, T, lg, *sc, *h, *br,
+                                     ks, NULL);
                     if (!frc) w->cached = T;
                 } else {
-                    frc = forward(w, c, cache, *seq + T - 1, 1, lg, *sc, *h, *br, ks, NULL);
+                    frc = k3_forward(w, c, cache, *seq + T - 1, 1, lg, *sc,
+                                     *h, *br, ks, NULL);
                     if (!frc) w->cached++;
                 }
             } else {
-                frc = forward(w, c, cache, *seq, T, lg, *sc, *h, *br, ks, NULL);
+                frc = k3_forward(w, c, cache, *seq, T, lg, *sc, *h, *br,
+                                 ks, NULL);
             }
             if (frc) break;
             int next = 0;
@@ -1221,9 +1123,9 @@ int main(int argc, char **argv)
         printf("\n");
     }
 
-    Weights w; memset(&w, 0, sizeof w);
-    w.lay = (K3LayerBind *)calloc((size_t)NL, sizeof(K3LayerBind));
-    if (!w.lay) return 1;
+    K3Weights w; memset(&w, 0, sizeof w);
+    w.layers = (K3LayerBind *)calloc((size_t)NL, sizeof(K3LayerBind));
+    if (!w.layers) return 1;
 
     static K3Trunk trunk;
     t0 = now_s();
@@ -1243,7 +1145,7 @@ int main(int argc, char **argv)
         printf("trunk streaming enabled from %s in %.1f s\n", trunk_dir, now_s() - t0);
     } else {
         for (int L = 0; L < NL; L++) {
-            if (k3_bind_layer(&st, &c, L, &w.lay[L]) != 0) {
+            if (k3_bind_layer(&st, &c, L, &w.layers[L]) != 0) {
                 fprintf(stderr, "bind failed at layer %d\n", L); return 1;
             }
             w.n_bound = L + 1;
@@ -1258,8 +1160,8 @@ int main(int argc, char **argv)
     }
 
     t0 = now_s();
-    if (k3_bind_model(&st, &c, 1, &w.mb) != 0) return 1;
-    human((double)w.mb.nbytes, b1, sizeof b1);
+    if (k3_bind_model(&st, &c, 1, &w.model) != 0) return 1;
+    human((double)w.model.nbytes, b1, sizeof b1);
     printf("embedding, final norm and lm_head: %s in %.1f s\n\n", b1, now_s() - t0);
 
     K3Cache cache;
@@ -1351,23 +1253,27 @@ int main(int argc, char **argv)
         w.n_mla = 0;
         for (int L = 0; L < NL; L++)
             w.mla_slot[L] = k3_is_mla(&c, L) ? w.n_mla++ : -1;
-        w.kv_cap = Tmax;
-        const size_t kvper = (size_t)w.kv_cap * c.n_heads * (c.qk_nope + c.v_head);
-        const size_t rpper = (size_t)w.kv_cap * c.qk_rope;
+        w.kv_capacity = Tmax;
+        const size_t kvper = (size_t)w.kv_capacity * c.n_heads *
+                             (c.qk_nope + c.v_head);
+        const size_t rpper = (size_t)w.kv_capacity * c.qk_rope;
         const double kvb = (double)(kvper + rpper) * w.n_mla * sizeof(float);
         human(kvb, b1, sizeof b1);
         printf("incremental decode: KV cache %s for %d MLA layers at %d positions\n\n",
-               b1, w.n_mla, w.kv_cap);
-        w.kvc   = (float *)calloc(kvper * (size_t)w.n_mla, sizeof(float));
-        w.ropec = (float *)calloc(rpper * (size_t)w.n_mla, sizeof(float));
-        if (!w.kvc || !w.ropec) { fprintf(stderr, "KV cache allocation failed\n"); return 1; }
+               b1, w.n_mla, w.kv_capacity);
+        w.kv_cache = (float *)calloc(kvper * (size_t)w.n_mla, sizeof(float));
+        w.rope_cache = (float *)calloc(rpper * (size_t)w.n_mla, sizeof(float));
+        if (!w.kv_cache || !w.rope_cache) {
+            fprintf(stderr, "KV cache allocation failed\n"); return 1;
+        }
         memset(ks, 0, kper * (size_t)NL * sizeof(float));
         w.cached = 0;
 
         if (load_state) {
             const double tl = now_s();
-            if (k3_state_load(load_state, &c, &shd, seq, ks, w.kvc, w.ropec,
-                              w.n_bound, w.n_mla, w.kv_cap) != 0)
+            if (k3_state_load(load_state, &c, &shd, seq, ks,
+                              w.kv_cache, w.rope_cache,
+                              w.n_bound, w.n_mla, w.kv_capacity) != 0)
                 return 1;
             w.cached = shd.cached;
             printf("restored %d positions in %.2f s: decode continues without "
@@ -1380,11 +1286,11 @@ int main(int argc, char **argv)
                                 &prompt, np, gen, incremental, greedy, temperature,
                                 top_p, seed, &w, &c, &cache, NL, &Tmax, &h, &br, ks,
                                 &sc, lg, &seq, outtok, maxb, kper);
-        free(w.kvc); free(w.ropec); free(w.mla_slot);
+        free(w.kv_cache); free(w.rope_cache); free(w.mla_slot);
         if (w.trunk) k3_trunk_close(w.trunk);
         k3_cache_free(&cache);
-        for (int L = 0; L < w.n_bound; L++) k3_bind_free(&w.lay[L]);
-        free(w.lay); k3_bind_model_free(&w.mb); k3_st_close(&st);
+        for (int L = 0; L < w.n_bound; L++) k3_bind_free(&w.layers[L]);
+        free(w.layers); k3_bind_model_free(&w.model); k3_st_close(&st);
         free(h); free(br); free(ks); free(sc); free(lg); free(seq); free(outtok);
         free(prompt); k3_chat_history_free(&chat_history);
         if (k3_expert_drops) {
@@ -1425,7 +1331,7 @@ int main(int argc, char **argv)
      * checkpoint is 94.2 percent against a 96.2 percent measurement ceiling, which is
      * what makes the draft worth consulting at all. */
     static K3Trunk trunk_d;
-    Weights dw; memset(&dw, 0, sizeof dw);
+    K3Weights dw; memset(&dw, 0, sizeof dw);
     float *dks = NULL, *dsnap = NULL;
     long hyb_rounds = 0, hyb_drafted = 0, hyb_accepted = 0;
     if (draft_dir) {
@@ -1441,22 +1347,23 @@ int main(int argc, char **argv)
             }
             if (k3_trunk_open(&trunk_d, draft_dir, &c, (int64_t)(draft_gb * 1e9)) != 0)
                 return 1;
-            dw.lay = (K3LayerBind *)calloc((size_t)NL, sizeof(K3LayerBind));
+            dw.layers = (K3LayerBind *)calloc((size_t)NL, sizeof(K3LayerBind));
             dks   = (float *)calloc(kper_f * (size_t)w.n_bound, sizeof(float));
             dsnap = (float *)malloc(kper_f * (size_t)w.n_bound * sizeof(float));
-            const size_t kvperd = (size_t)w.kv_cap * c.n_heads * (c.qk_nope + c.v_head);
-            const size_t rpperd = (size_t)w.kv_cap * c.qk_rope;
-            dw.kvc   = (float *)calloc(kvperd * (size_t)w.n_mla, sizeof(float));
-            dw.ropec = (float *)calloc(rpperd * (size_t)w.n_mla, sizeof(float));
-            if (!dw.lay || !dks || !dsnap || !dw.kvc || !dw.ropec) {
+            const size_t kvperd = (size_t)w.kv_capacity * c.n_heads *
+                                  (c.qk_nope + c.v_head);
+            const size_t rpperd = (size_t)w.kv_capacity * c.qk_rope;
+            dw.kv_cache = (float *)calloc(kvperd * (size_t)w.n_mla, sizeof(float));
+            dw.rope_cache = (float *)calloc(rpperd * (size_t)w.n_mla, sizeof(float));
+            if (!dw.layers || !dks || !dsnap || !dw.kv_cache || !dw.rope_cache) {
                 fprintf(stderr, "OOM for the draft model state\n"); return 1;
             }
-            dw.mb = w.mb;              /* embed + lm_head are the same tensors */
+            dw.model = w.model;        /* embed + lm_head are the same tensors */
             dw.trunk = &trunk_d;
             dw.n_bound = w.n_bound;
             dw.mla_slot = w.mla_slot;  /* read-only map, safely shared */
             dw.n_mla = w.n_mla;
-            dw.kv_cap = w.kv_cap;
+            dw.kv_capacity = w.kv_capacity;
             dw.cached = 0;
             dw.draft_mode = 1;   /* cache-only routing: draft tokens read no new experts */
             printf("hybrid decode: draft trunk %s (%.1f GB budget) proposes up to %d "
@@ -1476,7 +1383,7 @@ int main(int argc, char **argv)
         int *arg = (int *)malloc((size_t)np * sizeof(int));
         if (!arg) { fprintf(stderr, "OOM for --tf-check\n"); return 1; }
         const double t0c = now_s();
-        if (forward(&w, &c, &cache, seq, np, lg, sc, h, br, ks, arg) != 0) {
+        if (k3_forward(&w, &c, &cache, seq, np, lg, sc, h, br, ks, arg) != 0) {
             fprintf(stderr, "forward failed in --tf-check\n");
             return 1;
         }
@@ -1523,7 +1430,8 @@ int main(int argc, char **argv)
              * from a context one token short: fluent, plausible, and wrong. */
             const int base = w.cached;
             const int nT0 = T - base;
-            frc = forward(&w, &c, &cache, seq + base, nT0, lg, sc, h, br, ks, NULL);
+            frc = k3_forward(&w, &c, &cache, seq + base, nT0,
+                             lg, sc, h, br, ks, NULL);
             if (frc == 0) { w.cached = base + nT0; emit[emitn++] = argmax_(lg, c.vocab); }
             /* The draft model must absorb the same context, or its first proposals
              * come from a shorter one; one draft sweep, paid once. Saved state does
@@ -1532,15 +1440,16 @@ int main(int argc, char **argv)
              * acceptance does. */
             if (dw.trunk && frc == 0) {
                 const int db = load_state ? 0 : base;
-                if (forward(&dw, &c, &cache, seq + db, base + nT0 - db, lg, sc, h, br,
-                            dks, NULL) == 0)
+                if (k3_forward(&dw, &c, &cache, seq + db, base + nT0 - db,
+                               lg, sc, h, br, dks, NULL) == 0)
                     dw.cached = base + nT0;
                 else frc = -1;
             }
         } else if (incremental) {
             const int base = w.cached;
             int d[K3_SPEC_MAX], nd = 0;
-            if (spec_snap && T + spec_n + 1 < Tmax && base + spec_n + 1 <= w.kv_cap) {
+            if (spec_snap && T + spec_n + 1 < Tmax &&
+                base + spec_n + 1 <= w.kv_capacity) {
                 if (dw.trunk) {
                     /* The draft model proposes: k sequential one-token steps through
                      * the draft trunk, chaining its own argmax. Its state is
@@ -1549,8 +1458,8 @@ int main(int argc, char **argv)
                     memcpy(dsnap, dks, kper_f * (size_t)w.n_bound * sizeof(float));
                     int prev = seq[base];
                     while (nd < spec_n) {
-                        if (forward(&dw, &c, &cache, &prev, 1, lg, sc, h, br,
-                                    dks, NULL) != 0) break;
+                        if (k3_forward(&dw, &c, &cache, &prev, 1,
+                                       lg, sc, h, br, dks, NULL) != 0) break;
                         dw.cached += 1;
                         prev = argmax_(lg, c.vocab);
                         d[nd++] = prev;
@@ -1569,7 +1478,8 @@ int main(int argc, char **argv)
                 int arg[K3_SPEC_MAX + 1];
                 memcpy(spec_snap, ks, kper_f * (size_t)w.n_bound * sizeof(float));
                 for (int i = 0; i < nd; i++) seq[T + i] = d[i];
-                frc = forward(&w, &c, &cache, seq + base, nd + 1, lg, sc, h, br, ks, arg);
+                frc = k3_forward(&w, &c, &cache, seq + base, nd + 1,
+                                 lg, sc, h, br, ks, arg);
                 if (frc == 0) {
                     int m = 0;
                     while (m < nd && arg[m] == d[m]) m++;
@@ -1582,8 +1492,8 @@ int main(int argc, char **argv)
                          * KV rows those positions touched, so nothing stale survives. */
                         memcpy(ks, spec_snap, kper_f * (size_t)w.n_bound * sizeof(float));
                         w.cached = base;
-                        frc = forward(&w, &c, &cache, seq + base, m + 1, lg, sc, h, br,
-                                      ks, NULL);
+                        frc = k3_forward(&w, &c, &cache, seq + base, m + 1,
+                                         lg, sc, h, br, ks, NULL);
                         if (frc == 0) w.cached = base + m + 1;
                     }
                     /* Resync the draft model to the ACCEPTED sequence. On full
@@ -1595,14 +1505,16 @@ int main(int argc, char **argv)
                         hyb_accepted += m;
                         if (m == nd) {
                             int last = d[nd - 1];
-                            if (forward(&dw, &c, &cache, &last, 1, lg, sc, h, br,
-                                        dks, NULL) == 0) dw.cached += 1;
+                            if (k3_forward(&dw, &c, &cache, &last, 1,
+                                           lg, sc, h, br, dks, NULL) == 0)
+                                dw.cached += 1;
                             else frc = -1;
                         } else {
                             memcpy(dks, dsnap, kper_f * (size_t)w.n_bound * sizeof(float));
                             dw.cached = base;
-                            if (forward(&dw, &c, &cache, seq + base, m + 1, lg, sc,
-                                        h, br, dks, NULL) == 0) dw.cached = base + m + 1;
+                            if (k3_forward(&dw, &c, &cache, seq + base, m + 1,
+                                           lg, sc, h, br, dks, NULL) == 0)
+                                dw.cached = base + m + 1;
                             else frc = -1;
                         }
                     }
@@ -1612,17 +1524,19 @@ int main(int argc, char **argv)
                     }
                 }
             } else {
-                frc = forward(&w, &c, &cache, seq + base, 1, lg, sc, h, br, ks, NULL);
+                frc = k3_forward(&w, &c, &cache, seq + base, 1,
+                                 lg, sc, h, br, ks, NULL);
                 if (frc == 0) { w.cached = base + 1; emit[emitn++] = argmax_(lg, c.vocab); }
                 /* keep the draft in lockstep through non-drafted steps */
                 if (dw.trunk && frc == 0) {
-                    if (forward(&dw, &c, &cache, seq + base, 1, lg, sc, h, br,
-                                dks, NULL) == 0) dw.cached = base + 1;
+                    if (k3_forward(&dw, &c, &cache, seq + base, 1,
+                                   lg, sc, h, br, dks, NULL) == 0)
+                        dw.cached = base + 1;
                     else frc = -1;
                 }
             }
         } else {
-            frc = forward(&w, &c, &cache, seq, T, lg, sc, h, br, ks, NULL);
+            frc = k3_forward(&w, &c, &cache, seq, T, lg, sc, h, br, ks, NULL);
             if (frc == 0) emit[emitn++] = argmax_(lg, c.vocab);
         }
         /* Abort the run rather than argmax a buffer the forward never wrote. */
@@ -1673,8 +1587,9 @@ int main(int argc, char **argv)
             const double tsv = now_s();
             const int64_t kvpp   = (int64_t)c.n_heads * (c.qk_nope + c.v_head);
             const int64_t ropepp = (int64_t)c.qk_rope;
-            if (k3_state_save(save_state, &c, seq, T, ks, w.kvc, w.ropec,
-                              w.n_bound, w.n_mla, w.kv_cap, w.cached,
+            if (k3_state_save(save_state, &c, seq, T, ks,
+                              w.kv_cache, w.rope_cache,
+                              w.n_bound, w.n_mla, w.kv_capacity, w.cached,
                               (int64_t)kper, kvpp, ropepp) == 0) {
                 const double bytes = (double)sizeof(K3StateHdr) + (double)T * sizeof(int)
                     + (double)kper * w.n_bound * sizeof(float)
@@ -1693,7 +1608,8 @@ int main(int argc, char **argv)
                hyb_drafted ? 100.0 * hyb_accepted / hyb_drafted : 0.0,
                (double)hyb_accepted / hyb_rounds);
         k3_trunk_close(&trunk_d);
-        free(dw.lay); free(dks); free(dsnap); free(dw.kvc); free(dw.ropec);
+        free(dw.layers); free(dks); free(dsnap);
+        free(dw.kv_cache); free(dw.rope_cache);
     }
     free(spec_snap);
     printf("--------------------------------------------------------------------\n");
@@ -1738,7 +1654,7 @@ int main(int argc, char **argv)
         k3_cache_dump_trace(&cache, p);
     }
 
-    free(w.kvc); free(w.ropec); free(w.mla_slot);
+    free(w.kv_cache); free(w.rope_cache); free(w.mla_slot);
     /* Report the compute-versus-I/O split rather than leaving it to be inferred.
      *
      * It cannot be inferred safely: a flat curve across a RAM sweep looks like evidence
@@ -1785,9 +1701,9 @@ int main(int argc, char **argv)
     }
     if (w.trunk) { k3_trunk_report(w.trunk, "final"); k3_trunk_close(w.trunk); }
     k3_cache_free(&cache);
-    for (int L = 0; L < w.n_bound; L++) k3_bind_free(&w.lay[L]);
-    free(w.lay);
-    k3_bind_model_free(&w.mb);
+    for (int L = 0; L < w.n_bound; L++) k3_bind_free(&w.layers[L]);
+    free(w.layers);
+    k3_bind_model_free(&w.model);
     k3_st_close(&st);
     free(h); free(br); free(ks); free(sc); free(lg);
 

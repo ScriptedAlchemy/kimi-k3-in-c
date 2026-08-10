@@ -98,7 +98,8 @@ add_library(k3 STATIC
   src/io/k3_load.c
   src/io/k3_trunk.c
   src/cache/k3_cache.c
-  src/model/k3_bind.c)
+  src/model/k3_bind.c
+  src/runtime/k3_forward.c)
 
 target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -108,7 +109,8 @@ target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src/io
   ${CMAKE_CURRENT_SOURCE_DIR}/src/cache
   ${CMAKE_CURRENT_SOURCE_DIR}/src/model
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer)
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime)
 
 target_link_libraries(k3 PUBLIC k3_flags m Threads::Threads)
 
