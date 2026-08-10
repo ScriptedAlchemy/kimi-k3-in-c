@@ -107,7 +107,7 @@ CHAT_SRC   := src/chat/k3_chat.c src/chat/k3_sampler.c
 CLI_BIN    := $(BIN)/k3
 
 # Tests that need no checkpoint. These run in CI on every push.
-UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok test_chat scale_test k3_model
+UNIT_TESTS := test_ops test_cache test_st test_cfg test_tok test_chat test_runtime_api scale_test k3_model
 # Tests that need real shards. Built and run by `make test-all` with SHARD_DIR set;
 # see the weights-test target below.
 WEIGHT_TESTS := test_expert test_real_layer
@@ -156,6 +156,9 @@ $(BIN)/test_tok: tests/unit/test_tok.c | $(BIN)
 
 $(BIN)/test_chat: tests/unit/test_chat.c src/chat/k3_chat.c src/chat/k3_sampler.c | $(BIN)
 	$(CC) $(CFLAGS) -Wno-unused-function $(INCLUDES) $^ -o $@ $(LDFLAGS)
+
+$(BIN)/test_runtime_api: tests/unit/test_runtime_api.c | $(BIN)
+	$(CC) $(CFLAGS) $(INCLUDES) $< -o $@ $(LDFLAGS)
 
 $(BIN)/test_cfg: tests/unit/test_cfg.c src/core/k3_ops.c | $(BIN)
 	$(CC) -O2 -std=c99 $(WARN) -Wno-unused-function $(INCLUDES) $^ -o $@ -lm

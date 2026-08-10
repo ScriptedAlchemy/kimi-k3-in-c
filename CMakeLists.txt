@@ -143,6 +143,7 @@ k3_add_test(test_cfg    tests/unit/test_cfg.c)
 k3_add_test(test_tok    tests/unit/test_tok.c)
 k3_add_test(test_chat   tests/unit/test_chat.c)
 target_link_libraries(test_chat PRIVATE k3_chat)
+k3_add_test(test_runtime_api tests/unit/test_runtime_api.c)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
 
