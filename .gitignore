@@ -5,6 +5,7 @@ bin/
 *.o
 *.a
 *.so
+*.dylib
 *.exe
 compile_commands.json
 
@@ -60,3 +61,5 @@ venv/
 # confusing one to debug.
 !tests/fixtures/
 !tests/fixtures/**
+tests/fixtures/**/__pycache__/
+tests/fixtures/**/*.py[cod]

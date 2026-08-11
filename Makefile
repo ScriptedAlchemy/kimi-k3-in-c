@@ -132,8 +132,8 @@ TOK_FILES  ?= $(HOME)/k3model
 # two concurrent `make test` runs cannot race on one filename and `make clean` removes it.
 
 # ---------------------------------------------------------------------------- targets --
-.PHONY: all libk3 test test-all bench portable debug asan ubsan format clean install help \
-        tok cfg ops cache st oracle weights-test
+.PHONY: all libk3 server-test test test-all bench portable debug asan ubsan format \
+        clean install help tok cfg ops cache st oracle weights-test
 
 all: $(CLI_BIN)
 
@@ -153,6 +153,11 @@ libk3: $(LIBK3)
 
 $(LIBK3): $(PIC_OBJ)
 	$(CC) $(SHARED_LDFLAGS) $(PIC_OBJ) -o $@ $(LDFLAGS)
+
+## server-test: OpenAI/XTML/parser/socket tests against the real shared ABI
+server-test: libk3
+	K3_LIB="$(abspath $(LIBK3))" K3_DIR="$(abspath $(FIXTURES)/chat)" \
+	  $(PYTHON) -m unittest discover -s tests/k3serve -t . -v
 
 $(BIN):
 	@mkdir -p $(BIN)

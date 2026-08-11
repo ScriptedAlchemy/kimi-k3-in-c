@@ -49,6 +49,12 @@ MODIFICATIONS
   tests/fixtures/chat/LICENSE.kimi-k3 and the source pin plus SHA-256 values are in
   tests/fixtures/chat/manifest.json.
 
+  k3serve XTML, response-region, request-normalization, and HTTP test architecture
+  is adapted from SQLiteAI WARP, commit
+  2056d44f075c5e73c69c90d986e0dc89e9c9c6dd.
+  Copyright 2026 SQLite Cloud, Inc.; licensed under Apache-2.0.
+  The adapted files retain SPDX and modification notices.
+
 ================================================================================
 MODEL WEIGHTS
 ================================================================================

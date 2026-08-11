@@ -217,7 +217,7 @@ Clone, build and run the entire test suite. **No checkpoint, no network, no Pyth
 whole thing takes about a minute.
 
 ```bash
-git clone https://github.com/FareedKhan-dev/kimi-k3-in-c.git
+git clone https://github.com/ScriptedAlchemy/kimi-k3-in-c.git
 cd kimi-k3-in-c
 
 make -j            # seconds. Seven C files, a compiler and OpenMP
@@ -262,7 +262,7 @@ to a preset, measures your storage, and prints the exact command to run next.
 ### Step 0. clone
 
 ```bash
-git clone https://github.com/FareedKhan-dev/kimi-k3-in-c.git
+git clone https://github.com/ScriptedAlchemy/kimi-k3-in-c.git
 cd kimi-k3-in-c
 ```
 
@@ -430,8 +430,8 @@ is a pure speed choice.
 ### Text chat (official Kimi K3 XTML)
 
 K3 is chat-capable. `--chat` uses the official XTML segments and tokenizer control tokens;
-it does not fall back to ChatML or a handwritten generic prompt. Version one is text-only:
-there are no tools, images, server, or context compaction.
+it does not fall back to ChatML or a handwritten generic prompt. The built-in REPL is
+text-only; use `k3serve` below for OpenAI chat clients and function tools.
 
 ```bash
 ./bin/k3 ~/k3model --trunk ~/k3trunk --preset desktop --tok ~/k3model \
@@ -470,6 +470,21 @@ and the trunk remains disk-streamed unless those existing memory flags ask other
 The built-in REPL is text chat. The optional `k3serve` package adds an
 OpenAI-compatible HTTP surface, streamed reasoning, and typed function tools while
 using the same exact-weight runtime.
+
+```bash
+make -j server-test
+make -j libk3
+K3_LIB="$PWD/libk3.so" python3 -m k3serve \
+  --model /srv/kimi/model --trunk /srv/kimi/trunk \
+  --host 127.0.0.1 --port 8000
+```
+
+It implements `GET /health`, `GET /v1/models`, and
+`POST /v1/chat/completions`, including SSE, `reasoning_content`, tool declarations,
+typed function-call arguments, tool-result history, and `tool_choice`. It binds only to
+loopback by default; a non-loopback bind is refused unless `--api-key` (or `K3_API_KEY`)
+is set. Point OpenCode or another OpenAI client at `http://127.0.0.1:8000/v1` and use
+model ID `kimi-k3`.
 
 ### Diagnostic options
 
