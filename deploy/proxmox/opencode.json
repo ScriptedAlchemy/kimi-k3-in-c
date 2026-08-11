@@ -26,10 +26,10 @@
       "description": "Minimal local Kimi K3 tool-calling proof agent",
       "mode": "primary",
       "model": "kimi-local/kimi-k3",
-      "prompt": "Follow the user exactly. Use the bash tool when requested and report its output.",
+      "prompt": "Call the proof tool when asked, then report its output.",
       "permission": {
         "*": "deny",
-        "bash": "allow"
+        "proof": "allow"
       }
     }
   },

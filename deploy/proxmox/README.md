@@ -43,5 +43,8 @@ The installer also writes the official OpenCode 1 custom-provider shape to
 `/home/kimi/.config/opencode/opencode.json` when that file does not already exist. It
 uses `@ai-sdk/openai-compatible`, model `kimi-local/kimi-k3`, a 16K context, and the
 local `/v1/chat/completions` endpoint. Existing OpenCode configuration is preserved.
-The optional `kimi-proof` primary agent exposes only OpenCode's `bash` tool, keeping
-its tool declaration small enough for a practical end-to-end CPU inference check.
+The optional `kimi-proof` primary agent exposes only the zero-argument custom `proof`
+tool installed at `~/.config/opencode/tools/proof.ts`. The tool returns the fixed
+marker `KIMI_TOOL_OK`, keeping both its JSON schema and generated call payload small
+enough for a practical end-to-end CPU inference check. Existing tool files are
+preserved.
