@@ -6,6 +6,7 @@
 #include "k3_cache.h"
 #include "k3_cfg.h"
 #include "k3_forward.h"
+#include "k3_generate.h"
 #include "k3_runtime.h"
 #include "k3_st.h"
 #include "k3_tok.h"
@@ -38,6 +39,7 @@ struct K3Runtime {
 
     volatile int cancel;
     int busy;
+    long expert_drops_before;
     int have_config;
     int have_shards;
     int have_trunk;

@@ -467,9 +467,8 @@ K3Status k3_runtime_decode(K3Runtime *runtime, const int32_t *ids, size_t count,
     return K3_OK;
 }
 
-K3Status k3_runtime_reset(K3Runtime *runtime)
+static K3Status k3_runtime_reset_state(K3Runtime *runtime)
 {
-    if (!runtime) return K3_E_ARGUMENT;
     if (runtime->recurrent)
         memset(runtime->recurrent, 0,
                runtime->recurrent_floats * sizeof(float));
@@ -481,6 +480,7 @@ K3Status k3_runtime_reset(K3Runtime *runtime)
                runtime->rope_floats * sizeof(float));
     runtime->weights.cached = 0;
     runtime->cancel = 0;
+    runtime->error[0] = 0;
     if (runtime->have_cache) k3_cache_reset_stats(&runtime->cache);
     if (runtime->have_trunk) {
         runtime->trunk.hits = runtime->trunk.misses = 0;
@@ -490,15 +490,108 @@ K3Status k3_runtime_reset(K3Runtime *runtime)
     return K3_OK;
 }
 
+K3Status k3_runtime_reset(K3Runtime *runtime)
+{
+    if (!runtime) return K3_E_ARGUMENT;
+    if (__sync_val_compare_and_swap(&runtime->busy, 0, 0) != 0)
+        return K3_E_BUSY;
+    return k3_runtime_reset_state(runtime);
+}
+
+static K3Status k3_runtime_generation_prepare(void *opaque)
+{
+    K3Runtime *runtime = (K3Runtime *)opaque;
+    const K3Status status = k3_runtime_reset_state(runtime);
+    runtime->expert_drops_before = k3_expert_drops;
+    return status;
+}
+
+static K3Status k3_runtime_generation_step(void *opaque,
+                                           const int32_t *tokens, size_t count,
+                                           float **logits, size_t *vocabulary)
+{
+    K3Runtime *runtime = (K3Runtime *)opaque;
+    if (!tokens || count == 0 || count > (size_t)INT_MAX || !logits || !vocabulary)
+        return K3_E_ARGUMENT;
+    if (k3_forward(&runtime->weights, &runtime->cfg, &runtime->cache,
+                   tokens, (int)count, runtime->logits, runtime->scratch,
+                   runtime->hidden, runtime->attn_res, runtime->recurrent,
+                   NULL) != 0) {
+        k3_set_error(runtime, "forward pass failed");
+        return K3_E_ENGINE;
+    }
+    if (runtime->weights.kv_cache)
+        runtime->weights.cached += (int)count;
+    *logits = runtime->logits;
+    *vocabulary = (size_t)runtime->cfg.vocab;
+    return K3_OK;
+}
+
+static K3Status k3_runtime_generation_decode(void *opaque,
+                                             const int32_t *ids, size_t count,
+                                             char *text, size_t capacity,
+                                             size_t *needed)
+{
+    return k3_runtime_decode((K3Runtime *)opaque, ids, count,
+                             text, capacity, needed);
+}
+
+static uint64_t k3_runtime_generation_bytes_read(void *opaque)
+{
+    const K3Runtime *runtime = (const K3Runtime *)opaque;
+    return runtime->cache.bytes_read;
+}
+
+static K3Status k3_runtime_generation_finish(void *opaque, K3Status status,
+                                             K3Usage *usage)
+{
+    K3Runtime *runtime = (K3Runtime *)opaque;
+    usage->expert_hits = runtime->cache.hits;
+    usage->expert_misses = runtime->cache.misses;
+    usage->expert_bytes_read = runtime->cache.bytes_read;
+    usage->seconds_io = runtime->cache.load_seconds +
+                        (runtime->have_trunk ? runtime->trunk.load_seconds : 0.0);
+    if (k3_expert_drops != runtime->expert_drops_before) {
+        k3_set_error(runtime,
+                     "request invalid: one or more routed experts failed to load");
+        return K3_E_ENGINE;
+    }
+    return status;
+}
+
 K3Status k3_runtime_generate(K3Runtime *runtime, const int32_t *prompt,
                              size_t prompt_tokens,
                              const K3GenerationOptions *options,
                              K3TokenCallback callback, void *user,
                              K3Usage *usage)
 {
-    if (!runtime) return K3_E_ARGUMENT;
-    k3_set_error(runtime, "generation is not implemented yet");
-    return K3_E_ENGINE;
+    if (!runtime || !prompt || prompt_tokens == 0 || !callback || !usage)
+        return K3_E_ARGUMENT;
+    if (!runtime->have_model || !runtime->have_cache) {
+        k3_set_error(runtime, "model is not loaded");
+        return K3_E_ENGINE;
+    }
+    if (!runtime->have_tokenizer) {
+        k3_set_error(runtime, "tokenizer is not loaded");
+        return K3_E_ENGINE;
+    }
+
+    K3GenerateLoop loop;
+    memset(&loop, 0, sizeof loop);
+    loop.step = k3_runtime_generation_step;
+    loop.decode = k3_runtime_generation_decode;
+    loop.prepare = k3_runtime_generation_prepare;
+    loop.finish = k3_runtime_generation_finish;
+    loop.bytes_read = k3_runtime_generation_bytes_read;
+    loop.context = runtime;
+    loop.cancel = &runtime->cancel;
+    loop.busy = &runtime->busy;
+    loop.sequence = runtime->sequence;
+    loop.sequence_capacity = runtime->sequence_capacity;
+    loop.vocabulary = (size_t)runtime->cfg.vocab;
+    loop.incremental = runtime->weights.kv_cache != NULL;
+    return k3_generate_loop(&loop, prompt, prompt_tokens, options,
+                            callback, user, usage);
 }
 
 K3Status k3_runtime_cancel(K3Runtime *runtime)

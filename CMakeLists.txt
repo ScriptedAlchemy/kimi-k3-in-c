@@ -100,7 +100,9 @@ add_library(k3 STATIC
   src/cache/k3_cache.c
   src/model/k3_bind.c
   src/runtime/k3_forward.c
-  src/runtime/k3_runtime.c)
+  src/runtime/k3_runtime.c
+  src/runtime/k3_generate.c
+  src/chat/k3_sampler.c)
 
 target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -111,6 +113,7 @@ target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src/cache
   ${CMAKE_CURRENT_SOURCE_DIR}/src/model
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/chat
   ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime)
 
 target_link_libraries(k3 PUBLIC k3_flags m Threads::Threads)
@@ -121,7 +124,7 @@ set_target_properties(k3_cli PROPERTIES OUTPUT_NAME k3)
 
 # Chat is deliberately separate from the inference library: it is CLI policy and
 # transcript handling, not a new framework or a second execution backend.
-add_library(k3_chat STATIC src/chat/k3_chat.c src/chat/k3_sampler.c)
+add_library(k3_chat STATIC src/chat/k3_chat.c)
 target_include_directories(k3_chat PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src/chat
   ${CMAKE_CURRENT_SOURCE_DIR}/src/tokenizer
@@ -148,6 +151,7 @@ k3_add_test(test_chat   tests/unit/test_chat.c)
 target_link_libraries(test_chat PRIVATE k3_chat)
 k3_add_test(test_runtime_api tests/unit/test_runtime_api.c)
 k3_add_test(test_runtime tests/unit/test_runtime.c)
+k3_add_test(test_generate tests/unit/test_generate.c)
 k3_add_test(scale_test  tests/unit/scale_test.c)
 k3_add_test(k3_model    tests/unit/k3_model.c)
 
@@ -163,6 +167,7 @@ add_test(NAME scale      COMMAND scale_test)
 add_test(NAME oracle     COMMAND k3_model   ${FIX})
 add_test(NAME chat_template COMMAND test_chat ${FIX}/chat/tokenizer)
 add_test(NAME runtime_lifecycle COMMAND test_runtime ${FIX}/chat/tokenizer)
+add_test(NAME callback_generation COMMAND test_generate)
 
 # The negative half of the config contract. Each fixture is the working flat config with
 # exactly one field mutated, so a rejection can only come from that field. Without these
