@@ -1,16 +1,98 @@
 # C API
 
-For embedding the engine rather than using the `k3` binary. The public surface is
-`include/k3/k3.h` and `include/k3/k3_cfg.h`.
+For embedding the engine rather than using the `k3` binary. The managed runtime is
+declared by `include/k3/k3_runtime.h`; the lower-level kernels and configuration
+reader are declared by `include/k3/k3.h` and `include/k3/k3_cfg.h`.
 
 ```c
+#include <k3/k3_runtime.h>
 #include <k3/k3.h>
 #include <k3/k3_cfg.h>
 ```
 
-The API is deliberately small: a configuration struct, weight-binding structs, and the
-kernels. There is no context object and no hidden global state, everything a call needs
-is passed to it.
+The managed runtime owns one loaded model, its exact official-weight readers, tokenizer,
+expert cache, generation buffers, and recurrent state. The low-level API remains
+deliberately small: configuration and weight-binding structs plus the kernels, with no
+hidden context object.
+
+## Managed runtime
+
+`make libk3` produces `libk3.so` on Linux and `libk3.dylib` on macOS. The same library
+can be built as the CMake `k3_runtime` target. It is suitable for C callers and FFIs
+such as Python `ctypes`.
+
+```c
+#include <k3/k3_runtime.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int print_token(const K3Token *token, void *user)
+{
+    (void)user;
+    fwrite(token->piece, 1, token->piece_bytes, stdout);
+    fflush(stdout);
+    return 1; /* return 0 to cancel after this callback */
+}
+
+int main(void)
+{
+    K3RuntimeOptions open_options;
+    k3_runtime_options_init(&open_options);
+    open_options.trunk_dir = "/srv/kimi/trunk";
+    open_options.tokenizer_dir = "/srv/kimi/model";
+    open_options.context_tokens = 8192;
+
+    K3Runtime *runtime = NULL;
+    K3Status status = k3_runtime_open("/srv/kimi/model", &open_options, &runtime);
+    if (status != K3_OK) return 1;
+
+    const char *prompt = "Hello";
+    size_t prompt_count = 0;
+    status = k3_runtime_tokenize(runtime, prompt, strlen(prompt), 0,
+                                 NULL, 0, &prompt_count);
+    int32_t *prompt_ids = malloc(prompt_count * sizeof *prompt_ids);
+    if (status != K3_OK || !prompt_ids) goto fail;
+    status = k3_runtime_tokenize(runtime, prompt, strlen(prompt), 0,
+                                 prompt_ids, prompt_count, &prompt_count);
+    if (status != K3_OK) goto fail;
+
+    K3GenerationOptions generation;
+    K3Usage usage;
+    k3_generation_options_init(&generation);
+    generation.max_tokens = 64;
+    generation.greedy = 1;
+    status = k3_runtime_generate(runtime, prompt_ids, prompt_count, &generation,
+                                 print_token, NULL, &usage);
+    free(prompt_ids);
+    k3_runtime_close(runtime);
+    return status == K3_OK ? 0 : 1;
+
+fail:
+    fprintf(stderr, "%s\n", k3_runtime_last_error(runtime));
+    free(prompt_ids);
+    k3_runtime_close(runtime);
+    return 1;
+}
+```
+
+`k3_runtime_tokenize` and `k3_runtime_decode` support capacity queries: pass a NULL
+output with capacity zero, read `needed`, allocate, and call again. Passing a non-NULL
+buffer that is too small returns `K3_E_ARGUMENT` without a partial result.
+
+The callback's `piece` is valid only for the duration of that callback. Returning zero
+requests cancellation; another thread may also call `k3_runtime_cancel`. In either case
+generation returns `K3_E_CANCELLED`, while usage still describes work completed before
+the cancellation boundary. Stop-token IDs are not delivered to the callback.
+
+`k3_runtime_info` identifies the loaded representation as `official MXFP4 experts +
+BF16 trunk`. The engine consumes the checkpoint's native QAT MXFP4 expert bytes and the
+official BF16 always-active weights. It does not apply post-training quantization.
+
+A `K3Runtime` permits one generation at a time. Serialize generation callers outside
+the runtime; a concurrent call returns `K3_E_BUSY`. Health and model-discovery endpoints
+that do not start generation do not need that generation lock.
 
 ## Configuration
 
@@ -141,7 +223,7 @@ The kernels are reentrant and parallelise internally with OpenMP. They hold no g
 state except `k3_expert_drops`.
 
 The cache, the trunk reader, and the safetensors index are **not** thread-safe. One
-inference at a time per instance.
+inference at a time per managed runtime, as enforced by `k3_runtime_generate`.
 
 ## Minimal example
 

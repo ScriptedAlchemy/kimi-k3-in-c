@@ -21,6 +21,7 @@ PYTHON   ?= python3
 BUILD    ?= build
 BIN      ?= bin
 PREFIX   ?= /usr/local
+PIC_BUILD ?= $(BUILD)/pic
 
 # ---------------------------------------------------------------------- platform --
 # Two things differ on macOS/arm64 and both are build failures, not warnings:
@@ -42,6 +43,8 @@ UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
 ifeq ($(UNAME_S),Darwin)
+  LIBK3 := libk3.dylib
+  SHARED_LDFLAGS := -dynamiclib -Wl,-install_name,@rpath/libk3.dylib
   ifeq ($(UNAME_M),arm64)
     ARCH ?= -mcpu=native
   else
@@ -68,6 +71,8 @@ ifeq ($(UNAME_S),Darwin)
   # portable by requesting only the failure-on-first-error behavior there.
   ASAN_RUN_OPTIONS ?= halt_on_error=1
 else
+  LIBK3 := libk3.so
+  SHARED_LDFLAGS := -shared -Wl,-soname,libk3.so
   # -march=native is a real win on the expert matmuls but produces a binary that will
   # not run on an older CPU. `make portable` drops it.
   ARCH ?= -march=native
@@ -104,6 +109,7 @@ ENGINE_SRC := src/core/k3_ops.c \
               src/runtime/k3_forward.c src/runtime/k3_runtime.c \
               src/runtime/k3_generate.c src/chat/k3_sampler.c
 ENGINE_OBJ := $(patsubst %.c,$(BUILD)/%.o,$(ENGINE_SRC))
+PIC_OBJ := $(patsubst %.c,$(PIC_BUILD)/%.o,$(ENGINE_SRC))
 
 CLI_SRC    := src/cli/k3_run.c
 CHAT_SRC   := src/chat/k3_chat.c
@@ -126,7 +132,7 @@ TOK_FILES  ?= $(HOME)/k3model
 # two concurrent `make test` runs cannot race on one filename and `make clean` removes it.
 
 # ---------------------------------------------------------------------------- targets --
-.PHONY: all test test-all bench portable debug asan ubsan format clean install help \
+.PHONY: all libk3 test test-all bench portable debug asan ubsan format clean install help \
         tok cfg ops cache st oracle weights-test
 
 all: $(CLI_BIN)
@@ -135,8 +141,18 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
+$(PIC_BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -fPIC $(INCLUDES) -c $< -o $@
+
 $(CLI_BIN): $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) | $(BIN)
 	$(CC) $(CFLAGS) $(INCLUDES) $(CLI_SRC) $(CHAT_SRC) $(ENGINE_OBJ) -o $@ $(LDFLAGS)
+
+## libk3: build the ctypes-compatible shared runtime library
+libk3: $(LIBK3)
+
+$(LIBK3): $(PIC_OBJ)
+	$(CC) $(SHARED_LDFLAGS) $(PIC_OBJ) -o $@ $(LDFLAGS)
 
 $(BIN):
 	@mkdir -p $(BIN)
@@ -249,9 +265,9 @@ bench: $(BIN)/bench_kernels
 # sub-baseline worth naming -- the ISA is the baseline -- so tuning is simply omitted.
 portable:
 ifeq ($(UNAME_S)/$(UNAME_M),Darwin/arm64)
-	$(MAKE) ARCH= all
+	$(MAKE) ARCH= all libk3
 else
-	$(MAKE) ARCH="-mavx2 -mfma" all
+	$(MAKE) ARCH="-mavx2 -mfma" all libk3
 endif
 
 ## debug: -O0 -g, assertions on
@@ -279,15 +295,18 @@ format:
 # the two build systems are documented as interchangeable, so they must stay so.
 # third_party/json.h goes with them: k3_cfg.h includes it and exposes jval in its
 # signatures, so an installed k3_cfg.h without it does not compile.
-install: $(CLI_BIN)
+install: $(CLI_BIN) $(LIBK3)
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 755 $(CLI_BIN) $(DESTDIR)$(PREFIX)/bin/k3
+	install -d $(DESTDIR)$(PREFIX)/lib
+	install -m 755 $(LIBK3) $(DESTDIR)$(PREFIX)/lib/$(LIBK3)
 	install -d $(DESTDIR)$(PREFIX)/include/k3
 	install -m 644 include/k3/*.h $(DESTDIR)$(PREFIX)/include/k3/
 	install -m 644 third_party/json.h $(DESTDIR)$(PREFIX)/include/k3/
 
 clean:
 	rm -rf $(BUILD) $(BIN)
+	rm -f $(LIBK3)
 
 ## help: list targets
 help:

@@ -91,8 +91,7 @@ if(K3_SANITIZE)
   target_link_options(k3_flags INTERFACE -fsanitize=address,undefined)
 endif()
 
-# --------------------------------------------------------------------------- engine --
-add_library(k3 STATIC
+set(K3_ENGINE_SOURCES
   src/core/k3_ops.c
   src/io/k3_st.c
   src/io/k3_load.c
@@ -104,7 +103,12 @@ add_library(k3 STATIC
   src/runtime/k3_generate.c
   src/chat/k3_sampler.c)
 
-target_include_directories(k3 PUBLIC
+# --------------------------------------------------------------------------- engine --
+add_library(k3 STATIC ${K3_ENGINE_SOURCES})
+add_library(k3_runtime SHARED ${K3_ENGINE_SOURCES})
+set_target_properties(k3_runtime PROPERTIES OUTPUT_NAME k3)
+
+set(K3_PUBLIC_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/include/k3
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
@@ -116,7 +120,10 @@ target_include_directories(k3 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src/chat
   ${CMAKE_CURRENT_SOURCE_DIR}/src/runtime)
 
-target_link_libraries(k3 PUBLIC k3_flags m Threads::Threads)
+foreach(target k3 k3_runtime)
+  target_include_directories(${target} PUBLIC ${K3_PUBLIC_INCLUDE_DIRS})
+  target_link_libraries(${target} PUBLIC k3_flags m Threads::Threads)
+endforeach()
 
 # ------------------------------------------------------------------------------ cli --
 add_executable(k3_cli src/cli/k3_run.c)
@@ -198,7 +205,9 @@ set_tests_properties(tokenizer PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_executable(bench_kernels benchmarks/bench_kernels.c)
 target_link_libraries(bench_kernels PRIVATE k3)
 
-install(TARGETS k3_cli RUNTIME DESTINATION bin)
+install(TARGETS k3_cli k3_runtime
+        RUNTIME DESTINATION bin
+        LIBRARY DESTINATION lib)
 install(DIRECTORY include/k3 DESTINATION include)
 # k3_cfg.h includes json.h and exposes jval in its signatures, so an installed header
 # set without it does not compile. Kept in step with the Makefile's install target.
