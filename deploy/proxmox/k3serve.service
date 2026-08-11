@@ -2,7 +2,7 @@
 Description=Kimi K3 exact-weight OpenAI inference service
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/srv/kimi/.ready
+ConditionPathExists=/srv/kimi/logs/.ready
 
 [Service]
 Type=simple

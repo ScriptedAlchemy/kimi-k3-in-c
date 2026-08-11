@@ -6,6 +6,7 @@ MODEL_DIR=${MODEL_DIR:-/srv/kimi/model}
 TRUNK_DIR=${TRUNK_DIR:-/srv/kimi/trunk}
 MODEL_REVISION=${MODEL_REVISION:-9f62e4e9fffbd0a83ddd60e1c209d828994b3569}
 REPO_DIR=${REPO_DIR:-/opt/kimi-k3-in-c}
+READY_FILE=${READY_FILE:-/srv/kimi/logs/.ready}
 
 if [[ ${EUID} -ne 0 ]]; then
     echo "run as root inside the LXC guest" >&2
@@ -34,16 +35,17 @@ fi
 test -s "${TRUNK_DIR}/trunk.bin"
 test -s "${TRUNK_DIR}/trunk.json"
 
+install -d -m 0755 "$(dirname "${READY_FILE}")"
 {
     echo "repo=https://github.com/ScriptedAlchemy/kimi-k3-in-c"
     echo "source_commit=$(git -C "${REPO_DIR}" rev-parse HEAD)"
     echo "model=moonshotai/Kimi-K3"
     echo "model_revision=${MODEL_REVISION}"
     echo "weight_format=official MXFP4 experts + BF16 trunk"
-} > /srv/kimi/.ready
+} > "${READY_FILE}"
 
 if systemctl cat k3serve.service >/dev/null 2>&1; then
     systemctl restart k3serve.service
 fi
 
-cat /srv/kimi/.ready
+cat "${READY_FILE}"

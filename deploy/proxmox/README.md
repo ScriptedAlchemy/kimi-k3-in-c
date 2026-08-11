@@ -11,6 +11,7 @@ The installer builds and tests `libk3.so`, installs `k3serve.service`, and refus
 overwrite a dirty checkout. It does not create a VM backup, LXC backup, archive, or
 compressed template. The model remains a normal directory on the guest's Proxmox-backed
 `/srv/kimi` mount, so the backing Btrfs/ZFS dataset retains filesystem compression.
+The service starts only after `/srv/kimi/logs/.ready` records a completed preparation.
 
 After the resumable Hugging Face download has all 96 official shards, run:
 

@@ -50,7 +50,7 @@ fi
 
 systemctl daemon-reload
 systemctl enable k3serve.service
-if [[ -s /srv/kimi/.ready ]]; then
+if [[ -e /srv/kimi/logs/.ready ]]; then
     systemctl restart k3serve.service
 else
     echo "model is not finalized; service is enabled but remains stopped"
