@@ -47,6 +47,12 @@ if [[ ! -e /etc/kimi-k3-inference.env ]]; then
     install -m 0600 "${INSTALL_DIR}/deploy/proxmox/k3serve.env" \
         /etc/kimi-k3-inference.env
 fi
+install -d -m 0700 -o kimi -g kimi /home/kimi/.config/opencode
+if [[ ! -e /home/kimi/.config/opencode/opencode.json ]]; then
+    install -m 0600 -o kimi -g kimi \
+        "${INSTALL_DIR}/deploy/proxmox/opencode.json" \
+        /home/kimi/.config/opencode/opencode.json
+fi
 
 systemctl daemon-reload
 systemctl enable k3serve.service
@@ -59,3 +65,4 @@ fi
 
 echo "installed source commit: $(git -C "${INSTALL_DIR}" rev-parse HEAD)"
 echo "configuration: /etc/kimi-k3-inference.env"
+echo "OpenCode config: /home/kimi/.config/opencode/opencode.json"

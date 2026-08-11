@@ -30,3 +30,8 @@ base URL: http://127.0.0.1:8000/v1
 model:    kimi-k3
 API key:  value of K3_API_KEY, if configured
 ```
+
+The installer also writes the official OpenCode 1 custom-provider shape to
+`/home/kimi/.config/opencode/opencode.json` when that file does not already exist. It
+uses `@ai-sdk/openai-compatible`, model `kimi-local/kimi-k3`, an 8K context, and the
+local `/v1/chat/completions` endpoint. Existing OpenCode configuration is preserved.
