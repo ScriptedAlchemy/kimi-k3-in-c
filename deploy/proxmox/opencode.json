@@ -14,7 +14,7 @@
         "kimi-k3": {
           "name": "Kimi K3 (official MXFP4/BF16)",
           "limit": {
-            "context": 8192,
+            "context": 16384,
             "output": 512
           }
         }
