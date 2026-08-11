@@ -1,0 +1,28 @@
+[Unit]
+Description=Kimi K3 exact-weight OpenAI inference service
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/srv/kimi/.ready
+
+[Service]
+Type=simple
+User=kimi
+Group=kimi
+WorkingDirectory=/opt/kimi-k3-in-c
+EnvironmentFile=/etc/kimi-k3-inference.env
+Environment=K3_LIB=/opt/kimi-k3-in-c/libk3.so
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m k3serve --model ${K3_MODEL_DIR} --trunk ${K3_TRUNK_DIR} --host ${K3_HOST} --port ${K3_PORT} --model-id ${K3_MODEL_ID} --context ${K3_CONTEXT} --cache-gib ${K3_CACHE_GIB} --trunk-budget-gib ${K3_TRUNK_BUDGET_GIB} --max-tokens ${K3_MAX_TOKENS} --quiet
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/srv/kimi
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
