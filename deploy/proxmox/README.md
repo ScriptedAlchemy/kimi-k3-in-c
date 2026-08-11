@@ -23,6 +23,11 @@ Edit `/etc/kimi-k3-inference.env` for memory, threads, context, or networking. L
 is the safe default. To serve another machine, set `K3_HOST=0.0.0.0` and a non-empty
 `K3_API_KEY`; non-loopback startup without a key is refused.
 
+The shipped 160 GiB profile keeps the 8K context while reserving 70 GiB for the
+packed trunk prefix, 8 GiB for the expert cache, and 80 OpenMP threads. Pinning the
+entire 108.8 GB trunk together with an 8K KV cache can exceed a 160 GiB container;
+increase these budgets only after measuring the container's peak cgroup memory.
+
 OpenAI clients use:
 
 ```text
